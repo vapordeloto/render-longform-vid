@@ -197,7 +197,9 @@ def create_video_from_images(
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
     if result.returncode != 0:
-        raise RuntimeError(f"Video creation failed: {result.stderr[-2000:]}")
+        print("FFMPEG_CMD: " + " ".join(cmd), flush=True); print("FFMPEG_STDOUT:
+" + result.stdout, flush=True); print("FFMPEG_STDERR:
+" + result.stderr, flush=True); raise RuntimeError(f"Video creation failed (rc={result.returncode}): {result.stderr[-3000:]}")
 
     return final_duration
 
