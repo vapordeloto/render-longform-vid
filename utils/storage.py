@@ -20,7 +20,7 @@ def get_client():
         aws_access_key_id=ACCESS_KEY,
         aws_secret_access_key=SECRET_KEY,
         region_name=REGION,
-        config=Config(signature_version="s3v4"),
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
 
 
