@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 import httpx
 import time
+from botocore.exceptions import ClientError
 
 from utils.storage import BUCKET, ENDPOINT, get_client
 
@@ -54,8 +55,9 @@ def download_media(url: str, dest: Path) -> None:
                     for chunk in obj["Body"].iter_chunks(chunk_size=1024 * 1024):
                         f.write(chunk)
                 return
-            except client.exceptions.NoSuchKey:
-                if attempt == 5:
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "NoSuchKey" or attempt == 5:
                     raise
                 time.sleep(1.5)
     with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
