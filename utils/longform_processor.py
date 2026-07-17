@@ -2,18 +2,55 @@
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 import httpx
+
+from utils.storage import BUCKET, ENDPOINT, get_client
 
 MAX_LONGFORM_DURATION_SECONDS = 7200  # 2 hours
 DOWNLOAD_TIMEOUT = 300  # 5 min per file
 
 
+def _bucket_key_from_url(url: str) -> Optional[str]:
+    """
+    If url points at our own private storage bucket/endpoint, return the
+    object key inside the bucket. Otherwise return None.
+
+    Our Railway bucket is never publicly readable, so plain HTTP GETs to it
+    come back 403. When we recognize one of our own bucket URLs we fetch it
+    via an authenticated S3 request instead (using the storage credentials
+    already configured as Railway env vars) rather than a public GET.
+    """
+    if not ENDPOINT or not BUCKET:
+        return None
+    endpoint_host = urlparse(ENDPOINT).netloc
+    parsed = urlparse(url)
+    if not endpoint_host or parsed.netloc != endpoint_host:
+        return None
+    prefix = f"/{BUCKET}/"
+    if not parsed.path.startswith(prefix):
+        return None
+    return parsed.path[len(prefix):]
+
+
 def download_media(url: str, dest: Path) -> None:
-    """Download a single media file (audio, image, or video) from URL to dest."""
+    """Download a single media file (audio, image, or video) from URL to dest.
+
+    Files that live in our own Railway storage bucket are downloaded via an
+    authenticated S3 request (boto3, using our existing storage credentials)
+    since the bucket is private. Anything else falls back to a plain HTTP GET.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    bucket_key = _bucket_key_from_url(url)
+    if bucket_key:
+        client = get_client()
+        client.download_file(BUCKET, bucket_key, str(dest))
+        return
+
     with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
         r.raise_for_status()
-        dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes():
                 f.write(chunk)
