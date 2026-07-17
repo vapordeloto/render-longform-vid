@@ -48,7 +48,7 @@ def download_media(url: str, dest: Path) -> None:
     bucket_key = _bucket_key_from_url(url)
     if bucket_key:
         client = get_client()
-        for attempt in range(60):
+        for attempt in range(180):
             try:
                 obj = client.get_object(Bucket=BUCKET, Key=bucket_key)
                 with open(dest, "wb") as f:
@@ -57,7 +57,7 @@ def download_media(url: str, dest: Path) -> None:
                 return
             except ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
-                if code != "NoSuchKey" or attempt == 59:
+                if code != "NoSuchKey" or attempt == 179:
                     raise
                 time.sleep(5)
     with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
