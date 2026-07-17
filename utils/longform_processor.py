@@ -46,7 +46,10 @@ def download_media(url: str, dest: Path) -> None:
     bucket_key = _bucket_key_from_url(url)
     if bucket_key:
         client = get_client()
-        client.download_file(BUCKET, bucket_key, str(dest))
+        obj = client.get_object(Bucket=BUCKET, Key=bucket_key)
+        with open(dest, "wb") as f:
+            for chunk in obj["Body"].iter_chunks(chunk_size=1024 * 1024):
+                f.write(chunk)
         return
 
     with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
