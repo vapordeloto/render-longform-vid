@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 from urllib.parse import urlparse, unquote
 import httpx
 import time
-from botocore.exceptions import ClientError
 
 from utils.storage import BUCKET, ENDPOINT, get_client
 
@@ -21,7 +20,7 @@ def _bucket_key_from_url(url: str) -> Optional[str]:
 
     Our Railway bucket is never publicly readable, so plain HTTP GETs to it
     come back 403. When we recognize one of our own bucket URLs we fetch it
-    via an authenticated S3 request instead (using the storage credentials
+    via a presigned S3 URL instead (signed using the storage credentials
     already configured as Railway env vars) rather than a public GET.
     """
     if not ENDPOINT or not BUCKET:
@@ -35,30 +34,42 @@ def _bucket_key_from_url(url: str) -> Optional[str]:
         return None
     return unquote(parsed.path[len(prefix):])
 
+
 def download_media(url: str, dest: Path) -> None:
     """Download a single media file (audio, image, or video) from URL to dest.
 
-    Files that live in our own Railway storage bucket are downloaded via an
-    authenticated S3 request (boto3, using our existing storage credentials)
-    since the bucket is private. Anything else falls back to a plain HTTP GET.
+    Files that live in our own Railway storage bucket are downloaded via a
+    presigned S3 URL (signed with our existing storage credentials) instead
+    of a direct boto3 get_object() call. Direct get_object() proved
+    unreliable against the Tigris-backed bucket (spurious NoSuchKey on
+    objects confirmed to exist via the bucket's own file browser); a
+    presigned URL takes a different path through the storage gateway.
+    Anything else falls back to a plain HTTP GET.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     bucket_key = _bucket_key_from_url(url)
     if bucket_key:
+        client = get_client()
         for attempt in range(180):
-            try:
-                client = get_client()
-                obj = client.get_object(Bucket=BUCKET, Key=bucket_key)
+            presigned_url = client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": BUCKET, "Key": bucket_key},
+                ExpiresIn=3600,
+            )
+            with httpx.stream("GET", presigned_url, timeout=DOWNLOAD_TIMEOUT) as r:
+                if r.status_code == 404:
+                    if attempt == 179:
+                        r.raise_for_status()
+                    time.sleep(5)
+                    continue
+                r.raise_for_status()
                 with open(dest, "wb") as f:
-                    for chunk in obj["Body"].iter_chunks(chunk_size=1024 * 1024):
+                    for chunk in r.iter_bytes():
                         f.write(chunk)
                 return
-            except ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code != "NoSuchKey" or attempt == 179:
-                    raise
-                time.sleep(5)
+        return
+
     with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
@@ -197,7 +208,7 @@ def create_video_from_images(
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
     if result.returncode != 0:
-            print("FFMPEG_CMD: " + " ".join(cmd), flush=True); print("FFMPEG_STDOUT: " + result.stdout, flush=True); print("FFMPEG_STDERR: " + result.stderr, flush=True); raise RuntimeError(f"Video creation failed (rc={result.returncode}): {result.stderr[-3000:]}")
+        print("FFMPEG_CMD: " + " ".join(cmd), flush=True); print("FFMPEG_STDOUT: " + result.stdout, flush=True); print("FFMPEG_STDERR: " + result.stderr, flush=True); raise RuntimeError(f"Video creation failed (rc={result.returncode}): {result.stderr[-3000:]}")
 
     return final_duration
 
