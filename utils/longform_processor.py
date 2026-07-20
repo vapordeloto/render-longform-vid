@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import httpx
 import time
 from botocore.exceptions import ClientError
@@ -33,8 +33,7 @@ def _bucket_key_from_url(url: str) -> Optional[str]:
     prefix = f"/{BUCKET}/"
     if not parsed.path.startswith(prefix):
         return None
-    return parsed.path[len(prefix):]
-
+    return unquote(parsed.path[len(prefix):])
 
 def download_media(url: str, dest: Path) -> None:
     """Download a single media file (audio, image, or video) from URL to dest.
