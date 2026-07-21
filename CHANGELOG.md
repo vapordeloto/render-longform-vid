@@ -4,6 +4,15 @@ All notable changes to the Video Merge API project.
 
 ---
 
+## [2.1.0] - 2026-07-21
+
+### Added
+- **NEW:** Optional `title_text` field on `/api/v1/longform/render`. When provided, it is overlaid on the video (fading in/out) only during the first 6 seconds; the rest of the video shows just the plain background image/video. Implemented via an ffmpeg `drawtext` filter (not baked into the AI-generated background image), so text timing is fully deterministic and legible.
+- `title_text` is now included in job records (SQLite) and in `/api/v1/longform/result/{id}` responses.
+- Nixpacks build now installs `fontconfig` + `dejavu_fonts` so the drawtext overlay has a reliable font (with Spanish accented character support) at runtime.
+
+---
+
 ## [2.0.0] - 2026-02-11
 
 ### Major Release: Longform Video Rendering
