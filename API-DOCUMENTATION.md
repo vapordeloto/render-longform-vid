@@ -1,4 +1,4 @@
-# Video Merge API – Complete API Documentation
+# Video Merge API â Complete API Documentation
 
 Comprehensive guide for all endpoints in the Video Merge API, including the original video merge endpoint and the new longform video rendering endpoints.
 
@@ -59,13 +59,13 @@ All API requests (except health check) require an API key in the header:
 
 ### POST `/api/v1/merge`
 
-Merge 2–10 video URLs into one video with configurable quality and aspect ratio. This is a **synchronous** endpoint that processes immediately and returns the merged video URL.
+Merge 2â10 video URLs into one video with configurable quality and aspect ratio. This is a **synchronous** endpoint that processes immediately and returns the merged video URL.
 
 #### Request Body
 
 | Field          | Type     | Required | Values                          | Default  |
 |----------------|----------|----------|----------------------------------|----------|
-| `video_urls`   | string[] | Yes      | 2–10 valid HTTP(S) URLs          | —        |
+| `video_urls`   | string[] | Yes      | 2â10 valid HTTP(S) URLs          | â        |
 | `quality`      | string   | No       | `"720"` or `"1080"`              | `"1080"` |
 | `aspect_ratio` | string   | No       | `"9:16"`, `"16:9"`, `"1:1"`      | `"16:9"` |
 
@@ -111,10 +111,11 @@ Queue a longform video render job. This is an **asynchronous** endpoint that ret
 
 | Field              | Type     | Required | Values                                          | Default  |
 |-------------------|----------|----------|-------------------------------------------------|----------|
-| `audio_urls`      | string[] | Yes      | 1–30 valid HTTP(S) URLs to audio files          | —        |
-| `background_source` | string   | Yes      | `"images"` or `"videos"`                        | —        |
-| `background_urls` | string[] | Yes      | 1–15 image URLs OR 1–5 video URLs (depends on `background_source`) | — |
+| `audio_urls`      | string[] | Yes      | 1â30 valid HTTP(S) URLs to audio files          | â        |
+| `background_source` | string   | Yes      | `"images"` or `"videos"`                        | â        |
+| `background_urls` | string[] | Yes      | 1â15 image URLs OR 1â5 video URLs (depends on `background_source`) | â |
 | `quality`         | string   | No       | `"720"` or `"1080"`                             | `"1080"` |
+| `title_text`      | string   | No       | Title/tema text, max 200 chars                  | `null`   |
 
 **Constraints:**
 - `audio_urls`: Minimum 1, maximum 30 URLs
@@ -123,6 +124,7 @@ Queue a longform video render job. This is an **asynchronous** endpoint that ret
 - Final video is fixed at **16:9 aspect ratio**
 - Final video resolution: **720p (1280x720)** or **1080p (1920x1080)**
 - Total audio duration is capped at **2 hours (7200 seconds)**
+- `title_text`: if provided, it's overlaid on the video (fading in/out) only during the first 6 seconds; the rest of the video shows just the plain background image/video
 - Background videos are automatically **muted**
 - Background media is **looped/cycled** to match audio duration
 
@@ -221,9 +223,9 @@ Get the result of a completed render job. This endpoint only works for jobs with
 ## cURL Examples
 
 Replace:
-- `BASE_URL` → your API base URL (e.g. `https://your-app.up.railway.app` or `http://localhost:8000`)
-- `YOUR_API_KEY` → your actual API key
-- URLs → real, publicly accessible HTTP(S) URLs
+- `BASE_URL` â your API base URL (e.g. `https://your-app.up.railway.app` or `http://localhost:8000`)
+- `YOUR_API_KEY` â your actual API key
+- URLs â real, publicly accessible HTTP(S) URLs
 
 ---
 
@@ -242,7 +244,7 @@ curl -s "https://BASE_URL/health"
 
 ### 2. Merge Videos (Original Endpoint)
 
-#### Merge 2 videos – 1080p, 16:9
+#### Merge 2 videos â 1080p, 16:9
 
 ```bash
 curl -X POST "https://BASE_URL/api/v1/merge" \
@@ -258,7 +260,7 @@ curl -X POST "https://BASE_URL/api/v1/merge" \
   }'
 ```
 
-#### Merge 3 videos – 720p, 9:16 (vertical)
+#### Merge 3 videos â 720p, 9:16 (vertical)
 
 ```bash
 curl -X POST "https://BASE_URL/api/v1/merge" \
@@ -479,7 +481,7 @@ curl -X GET "https://BASE_URL/api/v1/longform/result/$REQUEST_ID" \
 ### Video Merge Endpoint (`/api/v1/merge`)
 
 - **URLs:** Between 2 and 10 per request
-- **Duration:** Sum of all input durations must be ≤ 7200 seconds (2 hours)
+- **Duration:** Sum of all input durations must be â¤ 7200 seconds (2 hours)
 - **Aspect Ratios:** 16:9, 9:16, or 1:1
 - **Quality:** 720p or 1080p
 - **Processing:** Synchronous (wait for response)
