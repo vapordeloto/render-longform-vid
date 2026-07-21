@@ -23,6 +23,15 @@ class LongformRenderRequest(BaseModel):
     background_source: str = Field(..., pattern="^(images|videos)$")
     background_urls: List[str] = Field(...)
     quality: str = Field(default="1080", pattern="^(720|1080)$")
+    title_text: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional title/tema text. If provided, it is overlaid on the "
+            "video only during the first few seconds (fading in/out); the "
+            "rest of the video shows just the plain background."
+        ),
+    )
 
     @field_validator("audio_urls")
     @classmethod
@@ -85,6 +94,7 @@ class JobResultResponse(BaseModel):
     background_source: str
     background_urls: List[str]
     quality: str
+    title_text: Optional[str] = None
 
 
 # --- Endpoints ---
@@ -120,6 +130,7 @@ async def render_longform_video(
             background_source=body.background_source,
             background_urls=body.background_urls,
             quality=body.quality,
+            title_text=body.title_text,
         )
     except Exception as e:
         logger.exception(f"Failed to create job: {e}")
@@ -192,4 +203,5 @@ async def get_render_result(
         background_source=job["background_source"],
         background_urls=job["background_urls"],
         quality=job["quality"],
+        title_text=job.get("title_text"),
     )
