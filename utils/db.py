@@ -8,12 +8,11 @@ from typing import Optional, Dict, Any, List
 
 DB_PATH = os.getenv("DATABASE_PATH", "jobs.db")
 
-
 async def init_db():
     """Initialize database and run migrations."""
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Run migration
         migration_file = Path(__file__).parent.parent / "migrations" / "001_initial_schema.sql"
@@ -30,8 +29,18 @@ async def init_db():
         if "title_text" not in existing_columns:
             await db.execute("ALTER TABLE jobs ADD COLUMN title_text TEXT")
 
-        await db.commit()
+        # Migration 003: add aspect_ratio + Shorts audio-clipping columns.
+        # Same idempotent pattern as migration 002 above.
+        async with db.execute("PRAGMA table_info(jobs)") as cursor:
+            existing_columns = [row[1] async for row in cursor]
+        if "aspect_ratio" not in existing_columns:
+            await db.execute("ALTER TABLE jobs ADD COLUMN aspect_ratio TEXT DEFAULT '16:9'")
+        if "audio_start_seconds" not in existing_columns:
+            await db.execute("ALTER TABLE jobs ADD COLUMN audio_start_seconds REAL DEFAULT 0")
+        if "clip_duration_seconds" not in existing_columns:
+            await db.execute("ALTER TABLE jobs ADD COLUMN clip_duration_seconds REAL")
 
+        await db.commit()
 
 async def create_job(
     job_id: str,
@@ -40,14 +49,21 @@ async def create_job(
     background_urls: List[str],
     quality: str,
     title_text: Optional[str] = None,
+    aspect_ratio: str = "16:9",
+    audio_start_seconds: float = 0,
+    clip_duration_seconds: Optional[float] = None,
 ) -> None:
     """Create a new job with pending status."""
     async with aiosqlite.connect(DB_PATH) as db:
         now = datetime.utcnow().isoformat()
         await db.execute(
             """
-            INSERT INTO jobs (id, status, created_at, updated_at, audio_urls, background_source, background_urls, quality, title_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (
+                id, status, created_at, updated_at, audio_urls,
+                background_source, background_urls, quality, title_text,
+                aspect_ratio, audio_start_seconds, clip_duration_seconds
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -59,10 +75,12 @@ async def create_job(
                 json.dumps(background_urls),
                 quality,
                 title_text,
+                aspect_ratio,
+                audio_start_seconds,
+                clip_duration_seconds,
             ),
         )
         await db.commit()
-
 
 async def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve a job by ID. Returns None if not found."""
@@ -72,13 +90,12 @@ async def get_job(job_id: str) -> Optional[Dict[str, Any]]:
             row = await cursor.fetchone()
             if row is None:
                 return None
-            
+
             job = dict(row)
             # Parse JSON fields
             job["audio_urls"] = json.loads(job["audio_urls"])
             job["background_urls"] = json.loads(job["background_urls"])
             return job
-
 
 async def update_job_status(job_id: str, status: str, error_message: Optional[str] = None) -> None:
     """Update job status and optionally set error message."""
@@ -89,7 +106,6 @@ async def update_job_status(job_id: str, status: str, error_message: Optional[st
             (status, now, error_message, job_id),
         )
         await db.commit()
-
 
 async def update_job_result(
     job_id: str,
@@ -102,14 +118,13 @@ async def update_job_result(
         now = datetime.utcnow().isoformat()
         await db.execute(
             """
-            UPDATE jobs 
+            UPDATE jobs
             SET status = ?, updated_at = ?, result_url = ?, duration_seconds = ?, processing_time = ?
             WHERE id = ?
             """,
             ("completed", now, result_url, duration_seconds, processing_time, job_id),
         )
         await db.commit()
-
 
 async def get_pending_jobs(limit: int = 10) -> List[Dict[str, Any]]:
     """Get pending jobs for processing."""
