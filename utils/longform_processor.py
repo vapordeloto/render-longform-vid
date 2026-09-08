@@ -20,9 +20,8 @@ TITLE_FADE_SECONDS = 0.6
 TITLE_FONT_SIZE = 64
 # Resolved via fontconfig at render time (requires "fontconfig" + "dejavu_fonts"
 # nix packages in nixpacks.toml). DejaVu Sans covers Spanish accented characters
-# (Ã¡ Ã© Ã­ Ã³ Ãº Ã± Â¿ Â¡).
+# (á é í ó ú ñ ¿ ¡).
 TITLE_FONT_FAMILY = "DejaVu Sans Bold"
-
 
 def _escape_drawtext(text: str) -> str:
     """
@@ -35,7 +34,6 @@ def _escape_drawtext(text: str) -> str:
         .replace("'", "\\'")
         .replace("%", "\\%")
     )
-
 
 def _title_overlay_filter(src_label: str, dst_label: str, title_text: Optional[str]) -> str:
     """
@@ -64,7 +62,6 @@ def _title_overlay_filter(src_label: str, dst_label: str, title_text: Optional[s
         f"enable='between(t,0,{TITLE_OVERLAY_DURATION_SECONDS})'[{dst_label}]"
     )
 
-
 def _bucket_key_from_url(url: str) -> Optional[str]:
     """
     If url points at our own private storage bucket/endpoint, return the
@@ -85,7 +82,6 @@ def _bucket_key_from_url(url: str) -> Optional[str]:
     if not parsed.path.startswith(prefix):
         return None
     return unquote(parsed.path[len(prefix):])
-
 
 def download_media(url: str, dest: Path) -> None:
     """Download a single media file (audio, image, or video) from URL to dest.
@@ -128,7 +124,6 @@ def download_media(url: str, dest: Path) -> None:
             for chunk in r.iter_bytes():
                 f.write(chunk)
 
-
 def get_media_duration(path: Path) -> float:
     """
     Get duration of an audio or video file in seconds using ffprobe.
@@ -161,7 +156,6 @@ def get_media_duration(path: Path) -> float:
 
     return duration
 
-
 def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     """
     Concatenate multiple audio files into one.
@@ -192,6 +186,40 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
 
     return total_duration
 
+def trim_audio(
+    input_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+) -> float:
+    """
+    Extract a short clip from `input_path`, starting at `start_seconds` and
+    lasting `duration_seconds`, writing the result to `output_path`.
+
+    Used for Shorts: instead of rendering the whole (often several minutes
+    long) pool track, we cut a 30-60s slice out of it so a single track can
+    produce many different Shorts (different start offsets sound different
+    even though it's the same source file).
+
+    Returns the actual duration of the trimmed clip (may be shorter than
+    `duration_seconds` if the source file is shorter than
+    start_seconds + duration_seconds).
+    """
+    start_seconds = max(0, start_seconds)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_seconds),
+        "-i", str(input_path),
+        "-t", str(duration_seconds),
+        "-c", "copy",
+        str(output_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio trim failed: {result.stderr[-1000:]}")
+
+    return get_media_duration(output_path)
 
 def create_video_from_images(
     image_paths: List[Path],
@@ -200,18 +228,22 @@ def create_video_from_images(
     quality: str,
     audio_duration: float,
     title_text: Optional[str] = None,
+    aspect_ratio: str = "16:9",
 ) -> float:
     """
     Create a video from images and audio.
     Images are looped/cycled to match audio duration.
-    Fixed aspect ratio: 16:9
+    Aspect ratio: 16:9 (default) or 9:16 (for YouTube Shorts).
     Resolution: 720p or 1080p
     If title_text is provided, it is overlaid (fading in/out) only during the
     first TITLE_OVERLAY_DURATION_SECONDS seconds; the rest of the video shows
     just the plain background image(s).
     Returns final video duration (capped at 2 hours).
     """
-    width, height = (1280, 720) if quality == "720" else (1920, 1080)
+    if aspect_ratio == "9:16":
+        width, height = (720, 1280) if quality == "720" else (1080, 1920)
+    else:
+        width, height = (1280, 720) if quality == "720" else (1920, 1080)
 
     # Calculate how long each image should be displayed
     num_images = len(image_paths)
@@ -270,7 +302,6 @@ def create_video_from_images(
         print("FFMPEG_CMD: " + " ".join(cmd), flush=True); print("FFMPEG_STDOUT: " + result.stdout, flush=True); print("FFMPEG_STDERR: " + result.stderr, flush=True); raise RuntimeError(f"Video creation failed (rc={result.returncode}): {result.stderr[-3000:]}")
 
     return final_duration
-
 
 def create_video_from_videos(
     video_paths: List[Path],
@@ -363,7 +394,6 @@ def create_video_from_videos(
 
     return final_duration
 
-
 def process_longform_video(
     audio_urls: List[str],
     background_source: str,
@@ -371,6 +401,9 @@ def process_longform_video(
     quality: str,
     temp_dir: Path,
     title_text: Optional[str] = None,
+    aspect_ratio: str = "16:9",
+    audio_start_seconds: float = 0,
+    clip_duration_seconds: Optional[float] = None,
 ) -> Tuple[Path, float]:
     """
     Main processing function for longform videos.
@@ -384,6 +417,13 @@ def process_longform_video(
         title_text: Optional title/tema text shown only during the first
             seconds of the video (see TITLE_OVERLAY_DURATION_SECONDS); the
             rest of the video shows just the plain background.
+        aspect_ratio: '16:9' (default) or '9:16' for YouTube Shorts. Only
+            applies to the images background_source; video backgrounds
+            always render at 16:9.
+        audio_start_seconds / clip_duration_seconds: for Shorts, if
+            clip_duration_seconds is set, only a slice of the concatenated
+            audio (starting at audio_start_seconds) is used instead of the
+            full track.
 
     Returns:
         (output_path, duration_seconds)
@@ -398,6 +438,15 @@ def process_longform_video(
     # Concatenate audio files
     combined_audio = temp_dir / "combined_audio.mp3"
     total_audio_duration = concatenate_audio(audio_paths, combined_audio)
+
+    # For Shorts: cut a short slice out of the (usually much longer) pool
+    # track instead of rendering the whole thing.
+    if clip_duration_seconds is not None:
+        clipped_audio = temp_dir / "clipped_audio.mp3"
+        total_audio_duration = trim_audio(
+            combined_audio, clipped_audio, audio_start_seconds, clip_duration_seconds
+        )
+        combined_audio = clipped_audio
 
     # Cap audio duration at 2 hours
     if total_audio_duration > MAX_LONGFORM_DURATION_SECONDS:
@@ -425,6 +474,7 @@ def process_longform_video(
             quality,
             total_audio_duration,
             title_text,
+            aspect_ratio,
         )
     else:  # videos
         final_duration = create_video_from_videos(
