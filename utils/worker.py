@@ -15,18 +15,17 @@ logger = logging.getLogger(__name__)
 WORKER_POLL_INTERVAL = 5  # seconds
 WORKER_ENABLED = True
 
-
 async def process_job(job: dict) -> None:
     """Process a single job."""
     job_id = job["id"]
     logger.info(f"Processing job {job_id}")
-    
+
     # Update status to processing
     await update_job_status(job_id, "processing")
-    
+
     start_time = time.perf_counter()
     temp_dir = Path(tempfile.mkdtemp())
-    
+
     try:
         # Process the video in a thread pool to avoid blocking the event loop
         loop = asyncio.get_event_loop()
@@ -39,8 +38,11 @@ async def process_job(job: dict) -> None:
             job["quality"],
             temp_dir,
             job.get("title_text"),
+            job.get("aspect_ratio") or "16:9",
+            job.get("audio_start_seconds") or 0,
+            job.get("clip_duration_seconds"),
         )
-        
+
         # Upload result (also blocking, run in thread pool)
         result_url = await loop.run_in_executor(
             None,
@@ -48,9 +50,9 @@ async def process_job(job: dict) -> None:
             output_path,
             f"longform-{job_id[:12]}",
         )
-        
+
         processing_time = time.perf_counter() - start_time
-        
+
         # Update job with result
         await update_job_result(
             job_id=job_id,
@@ -58,9 +60,9 @@ async def process_job(job: dict) -> None:
             duration_seconds=duration,
             processing_time=processing_time,
         )
-        
+
         logger.info(f"Job {job_id} completed successfully in {processing_time:.2f}s")
-        
+
     except Exception as e:
         logger.exception(f"Job {job_id} failed: {e}")
         await update_job_status(
@@ -80,27 +82,25 @@ async def process_job(job: dict) -> None:
         except OSError:
             pass
 
-
 async def worker_loop():
     """Main worker loop - polls for pending jobs and processes them."""
     logger.info("Background worker started")
-    
+
     while WORKER_ENABLED:
         try:
             # Get pending jobs
             jobs = await get_pending_jobs(limit=1)
-            
+
             if jobs:
                 for job in jobs:
                     await process_job(job)
             else:
                 # No jobs, wait before polling again
                 await asyncio.sleep(WORKER_POLL_INTERVAL)
-                
+
         except Exception as e:
             logger.exception(f"Worker loop error: {e}")
             await asyncio.sleep(WORKER_POLL_INTERVAL)
-
 
 def start_worker_background():
     """Start the worker in the background as an asyncio task."""
