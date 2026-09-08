@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/longform", tags=["longform"])
 
-
 # --- Request / Response models ---
-
 
 class LongformRenderRequest(BaseModel):
     audio_urls: List[str] = Field(..., min_length=1, max_length=30)
@@ -32,13 +30,39 @@ class LongformRenderRequest(BaseModel):
             "rest of the video shows just the plain background."
         ),
     )
+    aspect_ratio: str = Field(
+        default="16:9",
+        pattern="^(16:9|9:16)$",
+        description=(
+            "Video aspect ratio. '16:9' for regular/longform videos, "
+            "'9:16' for YouTube Shorts (vertical)."
+        ),
+    )
+    audio_start_seconds: float = Field(
+        default=0,
+        ge=0,
+        description=(
+            "For Shorts: where in the concatenated audio to start the clip, "
+            "in seconds. Ignored unless clip_duration_seconds is also set."
+        ),
+    )
+    clip_duration_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=180,
+        description=(
+            "For Shorts: if set, only use a clip of this many seconds from "
+            "the audio (starting at audio_start_seconds) instead of the "
+            "full concatenated audio. Ignored for regular longform videos."
+        ),
+    )
 
     @field_validator("audio_urls")
     @classmethod
     def validate_audio_urls(cls, v: List[str]) -> List[str]:
         if not v or len(v) < 1 or len(v) > 30:
             raise ValueError("Provide between 1 and 30 audio URLs")
-        
+
         url_re = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
         for i, u in enumerate(v):
             u = (u or "").strip()
@@ -52,28 +76,26 @@ class LongformRenderRequest(BaseModel):
         # Get background_source from the context
         data = info.data
         background_source = data.get("background_source")
-        
+
         if background_source == "images":
             if len(v) < 1 or len(v) > 15:
                 raise ValueError("For images: provide between 1 and 15 URLs")
         elif background_source == "videos":
             if len(v) < 1 or len(v) > 5:
                 raise ValueError("For videos: provide between 1 and 5 URLs")
-        
+
         url_re = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
         for i, u in enumerate(v):
             u = (u or "").strip()
             if not u or not url_re.match(u):
                 raise ValueError(f"Invalid background URL at index {i}: {u!r}")
-        
-        return [u.strip() for u in v]
 
+        return [u.strip() for u in v]
 
 class LongformRenderResponse(BaseModel):
     success: bool = True
     request_id: str
     message: str = "Render job queued. Use the request_id to check status."
-
 
 class JobStatusResponse(BaseModel):
     request_id: str
@@ -81,7 +103,6 @@ class JobStatusResponse(BaseModel):
     created_at: str
     updated_at: str
     error_message: Optional[str] = None
-
 
 class JobResultResponse(BaseModel):
     request_id: str
@@ -95,10 +116,9 @@ class JobResultResponse(BaseModel):
     background_urls: List[str]
     quality: str
     title_text: Optional[str] = None
-
+    aspect_ratio: str = "16:9"
 
 # --- Endpoints ---
-
 
 @router.post("/render", response_model=LongformRenderResponse)
 async def render_longform_video(
@@ -107,22 +127,26 @@ async def render_longform_video(
 ) -> LongformRenderResponse:
     """
     Queue a longform video render job.
-    
+
     - **audio_urls**: 1-30 audio file URLs (will be concatenated)
     - **background_source**: Either 'images' or 'videos'
     - **background_urls**: 1-15 image URLs or 1-5 video URLs (depending on background_source)
     - **quality**: '720' or '1080' (default: '1080')
-    
+    - **aspect_ratio**: '16:9' (default) or '9:16' for YouTube Shorts
+    - **audio_start_seconds** / **clip_duration_seconds**: optionally use only a
+      short slice of the audio (for Shorts) instead of the full track
+
     The final video will:
-    - Have a fixed 16:9 aspect ratio
-    - Match the total length of the combined audio (capped at 2 hours)
+    - Use the requested aspect ratio (16:9 by default, 9:16 for Shorts)
+    - Match the total length of the combined audio (or the requested clip,
+      capped at 2 hours)
     - Loop/cycle background media to match audio duration
     - Mute any background videos
-    
+
     Returns a request_id to poll for status and retrieve the result.
     """
     request_id = f"req_{uuid.uuid4().hex}"
-    
+
     try:
         await create_job(
             job_id=request_id,
@@ -131,6 +155,9 @@ async def render_longform_video(
             background_urls=body.background_urls,
             quality=body.quality,
             title_text=body.title_text,
+            aspect_ratio=body.aspect_ratio,
+            audio_start_seconds=body.audio_start_seconds,
+            clip_duration_seconds=body.clip_duration_seconds,
         )
     except Exception as e:
         logger.exception(f"Failed to create job: {e}")
@@ -138,9 +165,8 @@ async def render_longform_video(
             status_code=500,
             detail=f"Failed to queue render job: {str(e)}",
         )
-    
-    return LongformRenderResponse(request_id=request_id)
 
+    return LongformRenderResponse(request_id=request_id)
 
 @router.get("/status/{request_id}", response_model=JobStatusResponse)
 async def get_render_status(
@@ -149,7 +175,7 @@ async def get_render_status(
 ) -> JobStatusResponse:
     """
     Check the status of a render job.
-    
+
     Status values:
     - **pending**: Job is queued but not yet started
     - **processing**: Job is currently being processed
@@ -157,10 +183,10 @@ async def get_render_status(
     - **failed**: Job failed (check error_message)
     """
     job = await get_job(request_id)
-    
+
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     return JobStatusResponse(
         request_id=job["id"],
         status=job["status"],
@@ -169,7 +195,6 @@ async def get_render_status(
         error_message=job.get("error_message"),
     )
 
-
 @router.get("/result/{request_id}", response_model=JobResultResponse)
 async def get_render_result(
     request_id: str,
@@ -177,21 +202,21 @@ async def get_render_result(
 ) -> JobResultResponse:
     """
     Get the result of a completed render job.
-    
+
     This endpoint only returns data for completed jobs.
     Use /status endpoint first to check if the job is completed.
     """
     job = await get_job(request_id)
-    
+
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     if job["status"] != "completed":
         raise HTTPException(
             status_code=400,
             detail=f"Job is not completed. Current status: {job['status']}",
         )
-    
+
     return JobResultResponse(
         request_id=job["id"],
         status=job["status"],
@@ -204,4 +229,5 @@ async def get_render_result(
         background_urls=job["background_urls"],
         quality=job["quality"],
         title_text=job.get("title_text"),
+        aspect_ratio=job.get("aspect_ratio") or "16:9",
     )
