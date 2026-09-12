@@ -156,23 +156,49 @@ def get_media_duration(path: Path) -> float:
 
     return duration
 
+def guess_audio_extension(url: str) -> str:
+    """
+    Best-effort guess of an audio file's extension from its URL path, so
+    downloaded files keep their real container (mp3, m4a, wav, flac) instead
+    of always being force-named ".mp3". FFmpeg mostly sniffs by content, but
+    a correct extension avoids confusing tools that do rely on it.
+    """
+    path = urlparse(url).path
+    suffix = Path(unquote(path)).suffix.lower().lstrip(".")
+    if suffix in {"mp3", "m4a", "wav", "flac", "aac", "ogg"}:
+        return suffix
+    return "mp3"
+
+
 def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     """
     Concatenate multiple audio files into one.
     Returns the total duration in seconds.
+
+    NOTE: the pool mixes different source formats (mp3, m4a/AAC, wav, flac).
+    The old implementation used the FFmpeg concat *demuxer* with "-c copy"
+    (stream copy, no re-encoding), which only works when every input file is
+    the exact same codec/container. Mixing mp3 and m4a with "-c copy" makes
+    FFmpeg misdetect the stream and fail with "Header missing" errors.
+    Instead, feed every file in as a separate input and use the concat
+    *filter* (via filter_complex), which decodes each input and re-encodes
+    the result once at the end - this works regardless of the mix of source
+    formats.
     """
-    # Create a file list for FFmpeg concat demuxer
-    list_file = output_path.parent / "audio_list.txt"
-    with open(list_file, "w") as f:
-        for p in audio_paths:
-            f.write(f"file '{p.absolute()}'\n")
+    inputs = []
+    for p in audio_paths:
+        inputs.extend(["-i", str(p.absolute())])
+
+    filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
+    filter_complex = f"{filter_parts}concat=n={len(audio_paths)}:v=0:a=1[outa]"
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[outa]",
+        "-c:a", "libmp3lame",
+        "-q:a", "2",
         str(output_path),
     ]
 
@@ -182,7 +208,6 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
 
     # Get final duration
     total_duration = get_media_duration(output_path)
-    list_file.unlink()
 
     return total_duration
 
@@ -431,7 +456,7 @@ def process_longform_video(
     # Download all audio files
     audio_paths = []
     for i, url in enumerate(audio_urls):
-        dest = temp_dir / f"audio_{i}.mp3"
+        dest = temp_dir / f"audio_{i}.{guess_audio_extension(url)}"
         download_media(url, dest)
         audio_paths.append(dest)
 
