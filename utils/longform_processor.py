@@ -194,6 +194,20 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     read further in (or seek ahead) to find the real moov atom, which
     fixes this without needing to guess at the underlying codec.
 
+    Separately, some files trigger a different failure: the AAC decoder
+    thread crashes ("Terminating thread with return code <garbage
+    number>") followed by "Requested input sample rate 0 is invalid".
+    This is a decoder-thread crash, not a container/moov problem, and it
+    has been observed even on a *single* input file (Shorts only use one
+    audio track, so there is nothing to actually concatenate - the old
+    code still routed a single file through the concat filter, which
+    uses a multi-threaded fan-in even for n=1). Two changes address this:
+    (1) skip the concat filter entirely when there is only one input file
+    - just transcode it directly, which sidesteps the concat filter's
+    threading path altogether; (2) force single-threaded decoding
+    (-threads 1) on every input as a general safeguard against the same
+    decoder-thread crash when it does occur with multiple inputs.
+
     As a last-resort fallback (in case a file genuinely is a raw ADTS AAC
     elementary stream mislabeled with a container extension), if the
     plain attempt still fails with "moov atom not found", retry forcing
@@ -203,13 +217,36 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     rate 0 is invalid").
     """
 
+    # Fast path: nothing to concatenate, just transcode the single file.
+    # Avoids routing a lone input through the concat filter, which uses a
+    # multi-threaded fan-in even when n=1 and has been observed to crash
+    # the AAC decoder thread on some pool tracks.
+    if len(audio_paths) == 1:
+        p = audio_paths[0]
+        cmd = [
+            "ffmpeg", "-y",
+            "-threads", "1",
+            "-analyzeduration", "100M",
+            "-probesize", "100M",
+            "-i", str(p.absolute()),
+            "-threads", "1",
+            "-c:a", "libmp3lame",
+            "-q:a", "2",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
+        return get_media_duration(output_path)
+
     def build_cmd(force_aac_paths):
         inputs = []
         for p in audio_paths:
             if p in force_aac_paths:
-                inputs.extend(["-f", "aac", "-i", str(p.absolute())])
+                inputs.extend(["-threads", "1", "-f", "aac", "-i", str(p.absolute())])
             else:
                 inputs.extend([
+                    "-threads", "1",
                     "-analyzeduration", "100M",
                     "-probesize", "100M",
                     "-i", str(p.absolute()),
@@ -221,6 +258,7 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
             *inputs,
             "-filter_complex", filter_complex,
             "-map", "[outa]",
+            "-threads", "1",
             "-c:a", "libmp3lame",
             "-q:a", "2",
             str(output_path),
