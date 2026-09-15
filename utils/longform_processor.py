@@ -185,15 +185,22 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     the result once at the end - this works regardless of the mix of source
     formats.
 
-    Some pool tracks (notably ones exported via Suno) are raw ADTS AAC
-    elementary streams saved with a ".m4a" extension rather than a real
-    MP4/M4A container. FFmpeg's format auto-probe gives those a low
-    confidence score and then fails with "moov atom not found". Other
-    tracks with the same extension ARE valid containers, and forcing the
-    aac demuxer on those breaks them instead ("Requested input sample rate
-    0 is invalid"). So: try normally first: if ffmpeg fails specifically
-    with "moov atom not found", parse which input file(s) it actually
-    named in the error and retry forcing the aac demuxer only for those.
+    Some pool tracks (notably ones exported via Suno) hit "moov atom not
+    found" / "detected only with low score" errors. Root cause: these are
+    not "faststart" MP4/M4A files, so the moov atom (which holds the
+    container's stream index) sits at the END of the file instead of the
+    start, and FFmpeg's default probe only reads a small chunk from the
+    front before giving up. Raising -analyzeduration/-probesize lets it
+    read further in (or seek ahead) to find the real moov atom, which
+    fixes this without needing to guess at the underlying codec.
+
+    As a last-resort fallback (in case a file genuinely is a raw ADTS AAC
+    elementary stream mislabeled with a container extension), if the
+    plain attempt still fails with "moov atom not found", retry forcing
+    the aac demuxer only for the specific input file(s) ffmpeg names in
+    its error text - never blindly on every .m4a, since forcing it on a
+    file that is a real container breaks it ("Requested input sample
+    rate 0 is invalid").
     """
 
     def build_cmd(force_aac_paths):
@@ -202,7 +209,11 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
             if p in force_aac_paths:
                 inputs.extend(["-f", "aac", "-i", str(p.absolute())])
             else:
-                inputs.extend(["-i", str(p.absolute())])
+                inputs.extend([
+                    "-analyzeduration", "100M",
+                    "-probesize", "100M",
+                    "-i", str(p.absolute()),
+                ])
         filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
         filter_complex = f"{filter_parts}concat=n={len(audio_paths)}:v=0:a=1[outa]"
         return [
@@ -222,12 +233,8 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
             p for p in audio_paths
             if f"Error opening input file {p.absolute()}" in result.stderr
         }
-        if not broken:
-            # Couldn't isolate the exact file from ffmpeg's error text;
-            # fall back to forcing every .m4a input, since that is the
-            # only format known to hit this particular failure.
-            broken = {p for p in audio_paths if p.suffix.lower() == ".m4a"}
-        result = subprocess.run(build_cmd(broken), capture_output=True, text=True, timeout=600)
+        if broken:
+            result = subprocess.run(build_cmd(broken), capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
         raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
