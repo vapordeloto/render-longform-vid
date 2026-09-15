@@ -170,49 +170,6 @@ def guess_audio_extension(url: str) -> str:
     return "mp3"
 
 
-def repair_audio_if_broken(path: Path) -> None:
-    """
-    Some pool tracks (notably ones exported via Suno) are raw ADTS AAC
-    elementary streams saved with a ".m4a"/".aac" extension rather than a
-    real MP4/M4A container. FFmpeg's format auto-probe then misdetects them
-    and fails later with "moov atom not found". Other tracks with the same
-    extension ARE valid containers and must be left alone (forcing the aac
-    demuxer on a real MP4 container breaks it - "Requested input sample
-    rate 0 is invalid").
-
-    This checks the file with ffprobe first; only if ffprobe actually fails
-    to read it does it re-mux the file (forcing the aac demuxer) into a
-    proper container, in place.
-    """
-    probe = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=format_name",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if probe.returncode == 0 and (probe.stdout or "").strip():
-        return  # File is readable as-is, nothing to repair.
-
-    fixed_path = path.with_suffix(path.suffix + ".fixed.m4a")
-    remux_cmd = [
-        "ffmpeg", "-y",
-        "-f", "aac", "-i", str(path.absolute()),
-        "-c", "copy",
-        str(fixed_path.absolute()),
-    ]
-    remux = subprocess.run(remux_cmd, capture_output=True, text=True, timeout=120)
-    if remux.returncode != 0:
-        # Leave the original file in place; concatenate_audio will surface
-        # a clear ffmpeg error downstream if it truly can't be used.
-        return
-    fixed_path.replace(path)
-
-
 def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     """
     Concatenate multiple audio files into one.
@@ -227,25 +184,51 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     *filter* (via filter_complex), which decodes each input and re-encodes
     the result once at the end - this works regardless of the mix of source
     formats.
+
+    Some pool tracks (notably ones exported via Suno) are raw ADTS AAC
+    elementary streams saved with a ".m4a" extension rather than a real
+    MP4/M4A container. FFmpeg's format auto-probe gives those a low
+    confidence score and then fails with "moov atom not found". Other
+    tracks with the same extension ARE valid containers, and forcing the
+    aac demuxer on those breaks them instead ("Requested input sample rate
+    0 is invalid"). So: try normally first: if ffmpeg fails specifically
+    with "moov atom not found", parse which input file(s) it actually
+    named in the error and retry forcing the aac demuxer only for those.
     """
-    inputs = []
-    for p in audio_paths:
-        inputs.extend(["-i", str(p.absolute())])
 
-    filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
-    filter_complex = f"{filter_parts}concat=n={len(audio_paths)}:v=0:a=1[outa]"
+    def build_cmd(force_aac_paths):
+        inputs = []
+        for p in audio_paths:
+            if p in force_aac_paths:
+                inputs.extend(["-f", "aac", "-i", str(p.absolute())])
+            else:
+                inputs.extend(["-i", str(p.absolute())])
+        filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
+        filter_complex = f"{filter_parts}concat=n={len(audio_paths)}:v=0:a=1[outa]"
+        return [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", filter_complex,
+            "-map", "[outa]",
+            "-c:a", "libmp3lame",
+            "-q:a", "2",
+            str(output_path),
+        ]
 
-    cmd = [
-        "ffmpeg", "-y",
-        *inputs,
-        "-filter_complex", filter_complex,
-        "-map", "[outa]",
-        "-c:a", "libmp3lame",
-        "-q:a", "2",
-        str(output_path),
-    ]
+    result = subprocess.run(build_cmd(set()), capture_output=True, text=True, timeout=600)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0 and "moov atom not found" in (result.stderr or ""):
+        broken = {
+            p for p in audio_paths
+            if f"Error opening input file {p.absolute()}" in result.stderr
+        }
+        if not broken:
+            # Couldn't isolate the exact file from ffmpeg's error text;
+            # fall back to forcing every .m4a input, since that is the
+            # only format known to hit this particular failure.
+            broken = {p for p in audio_paths if p.suffix.lower() == ".m4a"}
+        result = subprocess.run(build_cmd(broken), capture_output=True, text=True, timeout=600)
+
     if result.returncode != 0:
         raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
 
@@ -253,7 +236,6 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     total_duration = get_media_duration(output_path)
 
     return total_duration
-
 def trim_audio(
     input_path: Path,
     output_path: Path,
@@ -501,7 +483,6 @@ def process_longform_video(
     for i, url in enumerate(audio_urls):
         dest = temp_dir / f"audio_{i}.{guess_audio_extension(url)}"
         download_media(url, dest)
-        repair_audio_if_broken(dest)
         audio_paths.append(dest)
 
     # Concatenate audio files
