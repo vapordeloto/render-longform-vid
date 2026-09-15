@@ -244,7 +244,13 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
             ]
 
         result = subprocess.run(build_single_cmd(False), capture_output=True, text=True, timeout=600)
-        if result.returncode != 0 and "moov atom not found" in (result.stderr or ""):
+        if result.returncode != 0:
+            # Retry forcing the aac demuxer for ANY failure (not just "moov atom
+            # not found") - some pool tracks crash the AAC decoder thread with a
+            # garbage return code ("Terminating thread with return code <n>")
+            # followed by "Requested input sample rate 0 is invalid", with no
+            # "moov atom" text in stderr at all. Forcing -f aac takes a different
+            # demux/decode path that has been observed to succeed on these files.
             result = subprocess.run(build_single_cmd(True), capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
@@ -277,13 +283,22 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
 
     result = subprocess.run(build_cmd(set()), capture_output=True, text=True, timeout=600)
 
-    if result.returncode != 0 and "moov atom not found" in (result.stderr or ""):
+    if result.returncode != 0:
+        # First retry: force aac only on the specific file(s) ffmpeg names as
+        # broken in its stderr (moov-atom-style errors report this).
         broken = {
             p for p in audio_paths
             if f"Error opening input file {p.absolute()}" in result.stderr
         }
         if broken:
             result = subprocess.run(build_cmd(broken), capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        # Second retry: some pool tracks crash the AAC decoder thread with a
+        # garbage return code and no "Error opening input file" text at all, so
+        # the specific broken file can't be identified from stderr. As a last
+        # resort, force the aac demuxer on every input and retry once more.
+        result = subprocess.run(build_cmd(set(audio_paths)), capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
         raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
