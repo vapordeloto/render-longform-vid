@@ -187,7 +187,15 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     """
     inputs = []
     for p in audio_paths:
-        inputs.extend(["-i", str(p.absolute())])
+        # Some pool tracks (notably ones exported via Suno) are raw ADTS AAC
+        # elementary streams saved with a ".m4a" extension rather than a real
+        # MP4/M4A container. FFmpeg's format auto-probe gives those a low
+        # confidence score and then fails with "moov atom not found". Forcing
+        # the "aac" demuxer for .m4a inputs sidesteps that misdetection.
+        if p.suffix.lower() == ".m4a":
+            inputs.extend(["-f", "aac", "-i", str(p.absolute())])
+        else:
+            inputs.extend(["-i", str(p.absolute())])
 
     filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
     filter_complex = f"{filter_parts}concat=n={len(audio_paths)}:v=0:a=1[outa]"
