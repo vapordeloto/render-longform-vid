@@ -396,7 +396,7 @@ def trim_audio(
         "-ss", str(start_seconds),
         "-i", str(input_path),
         "-t", str(duration_seconds),
-        "-c", "copy",
+        "-c:a", "libmp3lame", "-q:a", "2",
         str(output_path),
     ]
 
