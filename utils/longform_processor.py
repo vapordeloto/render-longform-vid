@@ -23,6 +23,7 @@ TITLE_FONT_SIZE = 64
 # (á é í ó ú ñ ¿ ¡).
 TITLE_FONT_FAMILY = "DejaVu Sans Bold"
 
+
 def _escape_drawtext(text: str) -> str:
     """
     Escape a raw string for safe use as ffmpeg drawtext's text= value.
@@ -34,6 +35,7 @@ def _escape_drawtext(text: str) -> str:
         .replace("'", "\\'")
         .replace("%", "\\%")
     )
+
 
 def _title_overlay_filter(src_label: str, dst_label: str, title_text: Optional[str]) -> str:
     """
@@ -62,6 +64,7 @@ def _title_overlay_filter(src_label: str, dst_label: str, title_text: Optional[s
         f"enable='between(t,0,{TITLE_OVERLAY_DURATION_SECONDS})'[{dst_label}]"
     )
 
+
 def _bucket_key_from_url(url: str) -> Optional[str]:
     """
     If url points at our own private storage bucket/endpoint, return the
@@ -82,6 +85,7 @@ def _bucket_key_from_url(url: str) -> Optional[str]:
     if not parsed.path.startswith(prefix):
         return None
     return unquote(parsed.path[len(prefix):])
+
 
 def download_media(url: str, dest: Path) -> None:
     """Download a single media file (audio, image, or video) from URL to dest.
@@ -124,6 +128,7 @@ def download_media(url: str, dest: Path) -> None:
             for chunk in r.iter_bytes():
                 f.write(chunk)
 
+
 def get_media_duration(path: Path) -> float:
     """
     Get duration of an audio or video file in seconds using ffprobe.
@@ -155,6 +160,7 @@ def get_media_duration(path: Path) -> float:
         raise ValueError(f"Could not parse media duration from ffprobe output: {raw!r}") from exc
 
     return duration
+
 
 def guess_audio_extension(url: str) -> str:
     """
@@ -215,6 +221,20 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     its error text - never blindly on every .m4a, since forcing it on a
     file that is a real container breaks it ("Requested input sample
     rate 0 is invalid").
+
+    2026-09-18: confirmed via real Shorts renders that -threads 1 and
+    forcing the aac demuxer do NOT fix the decoder-thread crash for some
+    Suno-exported tracks - three separately re-generated replacement
+    tracks all hit the identical "Terminating thread with return code
+    -1145393733" / "Requested input sample rate 0 is invalid" crash when
+    used as the single Shorts audio track, so the files themselves are
+    not corrupt; ffmpeg's default floating-point native AAC decoder has a
+    genuine crash bug on whatever these Suno exports contain. ffmpeg
+    ships a second, independent AAC decoder ("aac_fixed", integer-only)
+    that does not share that decode path/bug. As a further last resort,
+    force -c:a aac_fixed as the input decoder; "-err_detect ignore_err"
+    is also added throughout to make every attempt more tolerant of minor
+    stream irregularities.
     """
 
     # Fast path: nothing to concatenate, just transcode the single file.
@@ -224,14 +244,27 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
     if len(audio_paths) == 1:
         p = audio_paths[0]
 
-        def build_single_cmd(force_aac):
-            if force_aac:
-                inputs = ["-threads", "1", "-f", "aac", "-i", str(p.absolute())]
+        def build_single_cmd(mode):
+            if mode == "force_demux":
+                inputs = [
+                    "-threads", "1",
+                    "-f", "aac",
+                    "-err_detect", "ignore_err",
+                    "-i", str(p.absolute()),
+                ]
+            elif mode == "fixed_decoder":
+                inputs = [
+                    "-threads", "1",
+                    "-c:a", "aac_fixed",
+                    "-err_detect", "ignore_err",
+                    "-i", str(p.absolute()),
+                ]
             else:
                 inputs = [
                     "-threads", "1",
                     "-analyzeduration", "100M",
                     "-probesize", "100M",
+                    "-err_detect", "ignore_err",
                     "-i", str(p.absolute()),
                 ]
             return [
@@ -243,7 +276,7 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
                 str(output_path),
             ]
 
-        result = subprocess.run(build_single_cmd(False), capture_output=True, text=True, timeout=600)
+        result = subprocess.run(build_single_cmd("normal"), capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             # Retry forcing the aac demuxer for ANY failure (not just "moov atom
             # not found") - some pool tracks crash the AAC decoder thread with a
@@ -251,21 +284,44 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
             # followed by "Requested input sample rate 0 is invalid", with no
             # "moov atom" text in stderr at all. Forcing -f aac takes a different
             # demux/decode path that has been observed to succeed on these files.
-            result = subprocess.run(build_single_cmd(True), capture_output=True, text=True, timeout=600)
+            result = subprocess.run(build_single_cmd("force_demux"), capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            # Last resort: the crash is a genuine bug in ffmpeg's default
+            # floating-point native AAC decoder on certain Suno-exported
+            # streams (decoder thread dies with a garbage return code and
+            # "Requested input sample rate 0 is invalid", independent of
+            # demuxer). ffmpeg ships a second, independent AAC decoder
+            # ("aac_fixed", integer-only) that does not share the same
+            # decode path/bug - forcing it as the input decoder has been
+            # observed to succeed where both attempts above fail identically.
+            result = subprocess.run(build_single_cmd("fixed_decoder"), capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
         return get_media_duration(output_path)
 
-    def build_cmd(force_aac_paths):
+    def build_cmd(force_aac_paths, fixed_decoder_paths=frozenset()):
         inputs = []
         for p in audio_paths:
-            if p in force_aac_paths:
-                inputs.extend(["-threads", "1", "-f", "aac", "-i", str(p.absolute())])
+            if p in fixed_decoder_paths:
+                inputs.extend([
+                    "-threads", "1",
+                    "-c:a", "aac_fixed",
+                    "-err_detect", "ignore_err",
+                    "-i", str(p.absolute()),
+                ])
+            elif p in force_aac_paths:
+                inputs.extend([
+                    "-threads", "1",
+                    "-f", "aac",
+                    "-err_detect", "ignore_err",
+                    "-i", str(p.absolute()),
+                ])
             else:
                 inputs.extend([
                     "-threads", "1",
                     "-analyzeduration", "100M",
                     "-probesize", "100M",
+                    "-err_detect", "ignore_err",
                     "-i", str(p.absolute()),
                 ])
         filter_parts = "".join(f"[{i}:a]" for i in range(len(audio_paths)))
@@ -299,6 +355,14 @@ def concatenate_audio(audio_paths: List[Path], output_path: Path) -> float:
         # the specific broken file can't be identified from stderr. As a last
         # resort, force the aac demuxer on every input and retry once more.
         result = subprocess.run(build_cmd(set(audio_paths)), capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        # Third retry: switch every input to ffmpeg's alternate integer-only
+        # AAC decoder ("aac_fixed"), which does not share the crash bug in
+        # the default floating-point decoder that both attempts above hit
+        # (confirmed 2026-09-18 on real Shorts renders - see the fast-path
+        # comment above for detail).
+        result = subprocess.run(build_cmd(set(), set(audio_paths)), capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
         raise RuntimeError(f"Audio concatenation failed: {result.stderr[-1000:]}")
@@ -341,6 +405,7 @@ def trim_audio(
         raise RuntimeError(f"Audio trim failed: {result.stderr[-1000:]}")
 
     return get_media_duration(output_path)
+
 
 def create_video_from_images(
     image_paths: List[Path],
@@ -423,6 +488,7 @@ def create_video_from_images(
         print("FFMPEG_CMD: " + " ".join(cmd), flush=True); print("FFMPEG_STDOUT: " + result.stdout, flush=True); print("FFMPEG_STDERR: " + result.stderr, flush=True); raise RuntimeError(f"Video creation failed (rc={result.returncode}): {result.stderr[-3000:]}")
 
     return final_duration
+
 
 def create_video_from_videos(
     video_paths: List[Path],
@@ -514,6 +580,7 @@ def create_video_from_videos(
         raise RuntimeError(f"Video creation from videos failed: {result.stderr[-2000:]}")
 
     return final_duration
+
 
 def process_longform_video(
     audio_urls: List[str],
